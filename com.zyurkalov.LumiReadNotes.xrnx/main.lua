@@ -21,7 +21,7 @@ local active_notes = {}
 ------------------------------------------------------------------------
 -- Settings
 ------------------------------------------------------------------------
-local DEVICE_NAME = "H2MIDI-Pro (Port2)"
+local DEVICE_NAME = "H2MIDI-Pro (Port 2)"
 local DEFAULT_VELOCITY = 100
 local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
 local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
