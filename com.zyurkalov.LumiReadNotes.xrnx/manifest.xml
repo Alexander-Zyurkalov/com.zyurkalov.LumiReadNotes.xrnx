@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RenoiseScriptingTool doc_version="0">
+    <Id>com.zyurkalov.LumiReadNotes</Id>
+    <Name>LumiReadNotes</Name>
+    <Version>1.0.0</Version>
+    <Author>Zyurkalov</Author>
+    <Description>This is a basic Renoise tool that does nothing.</Description>
+    <ApiVersion>6.2</ApiVersion>
+    <Category>Tool Development</Category>
+    <Homepage>http://scripting.renoise.com</Homepage>
+    <Icon>icon.png</Icon>
+    <Platform>Windows, Mac, Linux</Platform>
+</RenoiseScriptingTool>

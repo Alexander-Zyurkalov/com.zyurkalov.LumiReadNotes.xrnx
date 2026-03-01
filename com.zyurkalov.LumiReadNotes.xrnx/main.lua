@@ -1,0 +1,318 @@
+-- H2MIDI-Pro Cursor Note Preview for Renoise
+-- When NOT playing, tracks cursor position (line + track) and sends
+-- the active notes at that position to "H2MIDI-Pro (Port2)" as MIDI.
+-- Looks backwards through the pattern to determine which notes are
+-- still sustaining, and sends proper Note On / Note Off messages.
+
+------------------------------------------------------------------------
+-- Global state
+------------------------------------------------------------------------
+local midi_output = nil
+local observers_attached = false
+
+-- Tracked cursor position (used to detect changes)
+local last_line_index = -1
+local last_track_index = -1
+local last_pattern_index = -1
+
+-- Currently sounding notes per column: { [col_idx] = { note, velocity, channel } }
+local active_notes = {}
+
+------------------------------------------------------------------------
+-- Settings
+------------------------------------------------------------------------
+local DEVICE_NAME = "H2MIDI-Pro (Port2)"
+local DEFAULT_VELOCITY = 100
+local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
+local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
+
+------------------------------------------------------------------------
+-- Renoise note-value constants
+------------------------------------------------------------------------
+local NOTE_OFF_VALUE = 120      -- The "OFF" marker in a note column
+local NOTE_EMPTY_VALUE = 121    -- Empty / no note
+
+------------------------------------------------------------------------
+-- Low-level MIDI helpers
+------------------------------------------------------------------------
+local function send_note_on(note, velocity, channel)
+    if midi_output and note >= 0 and note <= 119 then
+        midi_output:send({ 0x90 + (channel % 16), note, velocity })
+    end
+end
+
+local function send_note_off(note, channel)
+    if midi_output and note >= 0 and note <= 119 then
+        midi_output:send({ 0x80 + (channel % 16), note, 0 })
+    end
+end
+
+-- Kill every note we are currently holding
+local function all_notes_off()
+    for _, info in pairs(active_notes) do
+        send_note_off(info.note, info.channel)
+    end
+    active_notes = {}
+end
+
+-- Panic: send Note Off on every note on every channel
+local function midi_panic()
+    if not midi_output then return end
+    for ch = 0, 15 do
+        for n = 0, 127 do
+            send_note_off(n, ch)
+        end
+    end
+    active_notes = {}
+end
+
+------------------------------------------------------------------------
+-- Pattern analysis
+------------------------------------------------------------------------
+
+-- Walk backwards from `line_index` (inclusive) through `pattern_track`
+-- for the given `column_index` and return the note info that should be
+-- sounding at that position, or nil if the column is silent.
+local function find_active_note_at(pattern_track, column_index, line_index)
+    for l = line_index, 1, -1 do
+        local line = pattern_track:line(l)
+        if not line then
+            return nil
+        end
+
+        local note_columns = line.note_columns
+        if column_index > table.getn(note_columns) then
+            return nil
+        end
+
+        local col = note_columns[column_index]
+        local note_val = col.note_value
+
+        if note_val == NOTE_OFF_VALUE then
+            -- An explicit OFF before our position -> column is silent
+            return nil
+        elseif note_val ~= NOTE_EMPTY_VALUE then
+            -- Found a real note -> this is what should be sounding
+            local vol = col.volume_value
+
+            -- Renoise volume 0x00-0x80 maps roughly to MIDI velocity.
+            -- 0xFF means "no value" (use default).
+            local velocity = DEFAULT_VELOCITY
+            if vol ~= 0xFF and vol <= 0x80 then
+                -- Scale 0-128 to 1-127 MIDI velocity
+                velocity = math.max(1, math.min(127, math.floor(vol * 127 / 0x80 + 0.5)))
+            end
+
+            return {
+                note     = note_val,
+                velocity = velocity,
+                channel  = DEFAULT_CHANNEL,
+            }
+        end
+        -- NOTE_EMPTY_VALUE -> keep looking backwards
+    end
+
+    return nil -- reached top of pattern with no note
+end
+
+------------------------------------------------------------------------
+-- Core update – called by timer
+------------------------------------------------------------------------
+local function update_preview()
+    local song = renoise.song()
+
+    -- When Renoise is playing, stay silent so we don't double-trigger
+    if song.transport.playing then
+        if next(active_notes) then
+            all_notes_off()
+        end
+        -- Reset tracked position so we re-trigger when playback stops
+        last_line_index    = -1
+        last_track_index   = -1
+        last_pattern_index = -1
+        return
+    end
+
+    local cur_line    = song.selected_line_index
+    local cur_track   = song.selected_track_index
+    local cur_pattern = song.selected_pattern_index
+
+    -- Nothing to do if cursor hasn't moved
+    if cur_line    == last_line_index
+            and cur_track   == last_track_index
+            and cur_pattern == last_pattern_index then
+        return
+    end
+
+    last_line_index    = cur_line
+    last_track_index   = cur_track
+    last_pattern_index = cur_pattern
+
+    -- Only work on sequencer (note) tracks
+    local track = song.selected_track
+    if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
+        all_notes_off()
+        return
+    end
+
+    local pattern_track = song.selected_pattern.tracks[cur_track]
+    local num_columns   = track.visible_note_columns
+
+    -- Build the set of notes that should be sounding right now
+    local new_active = {}
+    for col_idx = 1, num_columns do
+        local info = find_active_note_at(pattern_track, col_idx, cur_line)
+        if info then
+            new_active[col_idx] = info
+        end
+    end
+
+    -- ---- Diff against previous state --------------------------------
+
+    -- 1. Note Offs for notes that stopped or changed
+    for col_idx, old in pairs(active_notes) do
+        local new_info = new_active[col_idx]
+        if not new_info
+                or new_info.note    ~= old.note
+                or new_info.channel ~= old.channel then
+            send_note_off(old.note, old.channel)
+        end
+    end
+
+    -- 2. Note Ons for notes that are new or changed
+    for col_idx, new_info in pairs(new_active) do
+        local old = active_notes[col_idx]
+        if not old
+                or old.note    ~= new_info.note
+                or old.channel ~= new_info.channel then
+            send_note_on(new_info.note, new_info.velocity, new_info.channel)
+        end
+    end
+
+    active_notes = new_active
+end
+
+------------------------------------------------------------------------
+-- Timer management
+------------------------------------------------------------------------
+local function start_timer()
+    if not renoise.tool():has_timer(update_preview) then
+        renoise.tool():add_timer(update_preview, POLL_INTERVAL_MS)
+    end
+end
+
+local function stop_timer()
+    if renoise.tool():has_timer(update_preview) then
+        renoise.tool():remove_timer(update_preview)
+    end
+end
+
+------------------------------------------------------------------------
+-- Observers – invalidate tracked position to force re-evaluation
+------------------------------------------------------------------------
+local function on_track_changed()
+    last_track_index = -1
+end
+
+local function on_pattern_changed()
+    last_pattern_index = -1
+end
+
+local function attach_observers()
+    if observers_attached then return end
+
+    local song = renoise.song()
+
+    if song.selected_track_index_observable:has_notifier(on_track_changed) == false then
+        song.selected_track_index_observable:add_notifier(on_track_changed)
+    end
+
+    if song.selected_pattern_index_observable:has_notifier(on_pattern_changed) == false then
+        song.selected_pattern_index_observable:add_notifier(on_pattern_changed)
+    end
+
+    observers_attached = true
+end
+
+local function detach_observers()
+    if not observers_attached then return end
+
+    local song = renoise.song()
+
+    if song.selected_track_index_observable:has_notifier(on_track_changed) then
+        song.selected_track_index_observable:remove_notifier(on_track_changed)
+    end
+
+    if song.selected_pattern_index_observable:has_notifier(on_pattern_changed) then
+        song.selected_pattern_index_observable:remove_notifier(on_pattern_changed)
+    end
+
+    observers_attached = false
+end
+
+------------------------------------------------------------------------
+-- Initialization
+------------------------------------------------------------------------
+local function initialize()
+    -- Tear down previous session
+    if midi_output then
+        all_notes_off()
+        midi_output:close()
+        midi_output = nil
+    end
+    detach_observers()
+    stop_timer()
+
+    -- Reset state
+    last_line_index    = -1
+    last_track_index   = -1
+    last_pattern_index = -1
+    active_notes       = {}
+
+    -- Find and open the output device
+    local devices = renoise.Midi.available_output_devices()
+    for i = 1, table.getn(devices) do
+        if devices[i] == DEVICE_NAME then
+            midi_output = renoise.Midi.create_output_device(DEVICE_NAME)
+            break
+        end
+    end
+
+    if midi_output then
+        print("H2MIDI-Pro Preview: Connected to " .. DEVICE_NAME)
+        attach_observers()
+        start_timer()
+    else
+        print("H2MIDI-Pro Preview: Device '" .. DEVICE_NAME .. "' not found")
+    end
+end
+
+------------------------------------------------------------------------
+-- Entry points
+------------------------------------------------------------------------
+
+-- Auto-start
+initialize()
+
+-- Menu entry to reconnect / re-init
+renoise.tool():add_menu_entry {
+    name = "Main Menu:Tools:Reconnect H2MIDI-Pro Preview",
+    invoke = initialize
+}
+
+-- Menu entry for MIDI panic
+renoise.tool():add_menu_entry {
+    name = "Main Menu:Tools:H2MIDI-Pro MIDI Panic",
+    invoke = midi_panic
+}
+
+-- Cleanup on document release (song close)
+renoise.tool().app_release_document_observable:add_notifier(function()
+    all_notes_off()
+    detach_observers()
+    stop_timer()
+    if midi_output then
+        midi_output:close()
+        midi_output = nil
+    end
+end)
