@@ -1,6 +1,6 @@
 -- H2MIDI-Pro Cursor Note Preview for Renoise
 -- When NOT playing, tracks cursor position (line + track) and sends
--- the active notes at that position to "H2MIDI-Pro (Port2)" as MIDI.
+-- the active notes at that position to "H2MIDI-Pro (Port 2)" as MIDI.
 -- Looks backwards through the pattern to determine which notes are
 -- still sustaining, and sends proper Note On / Note Off messages.
 
@@ -14,6 +14,7 @@ local observers_attached = false
 local last_line_index = -1
 local last_track_index = -1
 local last_pattern_index = -1
+local last_line_fingerprint = ""
 
 -- Currently sounding notes per column: { [col_idx] = { note, velocity, channel } }
 local active_notes = {}
@@ -118,6 +119,23 @@ end
 ------------------------------------------------------------------------
 -- Core update – called by timer
 ------------------------------------------------------------------------
+
+-- Build a short string that captures every note column's note + volume
+-- on the current line so we can detect in-place edits.
+local function line_fingerprint(pattern_track, line_index, num_columns)
+    local parts = {}
+    local line = pattern_track:line(line_index)
+    if not line then return "" end
+    local note_columns = line.note_columns
+    for col = 1, num_columns do
+        if col <= table.getn(note_columns) then
+            local c = note_columns[col]
+            parts[col] = c.note_value .. "," .. c.volume_value
+        end
+    end
+    return table.concat(parts, ";")
+end
+
 local function update_preview()
     local song = renoise.song()
 
@@ -127,9 +145,10 @@ local function update_preview()
             all_notes_off()
         end
         -- Reset tracked position so we re-trigger when playback stops
-        last_line_index    = -1
-        last_track_index   = -1
-        last_pattern_index = -1
+        last_line_index        = -1
+        last_track_index       = -1
+        last_pattern_index     = -1
+        last_line_fingerprint  = ""
         return
     end
 
@@ -137,26 +156,32 @@ local function update_preview()
     local cur_track   = song.selected_track_index
     local cur_pattern = song.selected_pattern_index
 
-    -- Nothing to do if cursor hasn't moved
-    if cur_line    == last_line_index
-            and cur_track   == last_track_index
-            and cur_pattern == last_pattern_index then
-        return
-    end
-
-    last_line_index    = cur_line
-    last_track_index   = cur_track
-    last_pattern_index = cur_pattern
-
     -- Only work on sequencer (note) tracks
     local track = song.selected_track
     if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
         all_notes_off()
+        last_line_fingerprint = ""
         return
     end
 
     local pattern_track = song.selected_pattern.tracks[cur_track]
     local num_columns   = track.visible_note_columns
+
+    -- Compute fingerprint to detect in-place edits
+    local fp = line_fingerprint(pattern_track, cur_line, num_columns)
+
+    -- Nothing to do if cursor hasn't moved AND content hasn't changed
+    if cur_line    == last_line_index
+            and cur_track   == last_track_index
+            and cur_pattern == last_pattern_index
+            and fp          == last_line_fingerprint then
+        return
+    end
+
+    last_line_index       = cur_line
+    last_track_index      = cur_track
+    last_pattern_index    = cur_pattern
+    last_line_fingerprint = fp
 
     -- Build the set of notes that should be sounding right now
     local new_active = {}
@@ -264,10 +289,11 @@ local function initialize()
     stop_timer()
 
     -- Reset state
-    last_line_index    = -1
-    last_track_index   = -1
-    last_pattern_index = -1
-    active_notes       = {}
+    last_line_index       = -1
+    last_track_index      = -1
+    last_pattern_index    = -1
+    last_line_fingerprint = ""
+    active_notes          = {}
 
     -- Find and open the output device
     local devices = renoise.Midi.available_output_devices()
