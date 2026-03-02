@@ -3,11 +3,17 @@
 -- the active notes at that position to "H2MIDI-Pro (Port 2)" as MIDI.
 -- Looks backwards through the pattern to determine which notes are
 -- still sustaining, and sends proper Note On / Note Off messages.
+--
+-- Also listens on "H2MIDI-Pro (Port 1)" for incoming notes. When a
+-- note arrives that matches one we are already holding, we re-send
+-- the Note On after 500ms so the keyboard LEDs re-light after the
+-- user's own Note Off kills them.
 
 ------------------------------------------------------------------------
 -- Global state
 ------------------------------------------------------------------------
-local midi_output = nil
+local midi_output = nil          -- Port 2 (output to light keyboard)
+local midi_input = nil           -- Port 1 (listen for user key presses)
 local observers_attached = false
 
 -- Tracked cursor position (used to detect changes)
@@ -19,13 +25,18 @@ local last_line_fingerprint = ""
 -- Currently sounding notes per column: { [col_idx] = { note, velocity, channel } }
 local active_notes = {}
 
+-- Whether a delayed resend (call to update_preview) is pending
+local resend_pending = false
+
 ------------------------------------------------------------------------
 -- Settings
 ------------------------------------------------------------------------
-local DEVICE_NAME = "H2MIDI-Pro (Port 2)"
+local OUTPUT_DEVICE_NAME = "H2MIDI-Pro (Port 2)"
+local INPUT_DEVICE_NAME  = "H2MIDI-Pro (Port 1)"
 local DEFAULT_VELOCITY = 100
 local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
 local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
+local RESEND_DELAY_MS  = 500    -- Delay before re-sending a note after user press
 
 ------------------------------------------------------------------------
 -- Renoise note-value constants
@@ -65,6 +76,62 @@ local function midi_panic()
         end
     end
     active_notes = {}
+end
+
+------------------------------------------------------------------------
+-- Delayed resend logic (single timer)
+------------------------------------------------------------------------
+
+local function resend_callback()
+    -- Remove the one-shot timer
+    if renoise.tool():has_timer(resend_callback) then
+        renoise.tool():remove_timer(resend_callback)
+    end
+    resend_pending = false
+
+    -- Clear active notes and fingerprint so update_preview re-sends everything
+    active_notes = {}
+    last_line_fingerprint = ""
+    update_preview()
+end
+
+local function schedule_resend()
+    if resend_pending then cancel_resend() end
+    resend_pending = true
+    renoise.tool():add_timer(resend_callback, RESEND_DELAY_MS)
+end
+
+local function cancel_resend()
+    if not resend_pending then return end
+    if renoise.tool():has_timer(resend_callback) then
+        renoise.tool():remove_timer(resend_callback)
+    end
+    resend_pending = false
+end
+
+------------------------------------------------------------------------
+-- Port 1 MIDI input callback
+------------------------------------------------------------------------
+local function input_midi_callback(message)
+    local status  = message[1]
+    local note    = message[2] or 0
+    local command = status - (status % 16)  -- strip channel
+
+    -- We care about Note Off (0x80) or Note On with velocity 0 (also Note Off)
+    local is_note_off = (command == 0x80)
+            or (command == 0x90 and (message[3] or 0) == 0)
+
+    if not is_note_off then
+        return
+    end
+
+    -- Check if this note is in our active set
+    for _, info in pairs(active_notes) do
+        if info.note == note then
+            schedule_resend()
+            return
+        end
+    end
 end
 
 ------------------------------------------------------------------------
@@ -143,6 +210,7 @@ local function update_preview()
     if song.transport.playing then
         if next(active_notes) then
             all_notes_off()
+            cancel_resend()
         end
         -- Reset tracked position so we re-trigger when playback stops
         last_line_index        = -1
@@ -160,6 +228,7 @@ local function update_preview()
     local track = song.selected_track
     if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
         all_notes_off()
+        cancel_resend()
         last_line_fingerprint = ""
         return
     end
@@ -182,6 +251,9 @@ local function update_preview()
     last_track_index      = cur_track
     last_pattern_index    = cur_pattern
     last_line_fingerprint = fp
+
+    -- Cancel pending resends – the context has changed
+    cancel_resend()
 
     -- Build the set of notes that should be sounding right now
     local new_active = {}
@@ -285,8 +357,13 @@ local function initialize()
         midi_output:close()
         midi_output = nil
     end
+    if midi_input then
+        midi_input:close()
+        midi_input = nil
+    end
     detach_observers()
     stop_timer()
+    cancel_resend()
 
     -- Reset state
     last_line_index       = -1
@@ -295,21 +372,39 @@ local function initialize()
     last_line_fingerprint = ""
     active_notes          = {}
 
-    -- Find and open the output device
-    local devices = renoise.Midi.available_output_devices()
-    for i = 1, table.getn(devices) do
-        if devices[i] == DEVICE_NAME then
-            midi_output = renoise.Midi.create_output_device(DEVICE_NAME)
+    -- Find and open the output device (Port 2)
+    local output_devices = renoise.Midi.available_output_devices()
+    for i = 1, table.getn(output_devices) do
+        if output_devices[i] == OUTPUT_DEVICE_NAME then
+            midi_output = renoise.Midi.create_output_device(OUTPUT_DEVICE_NAME)
+            break
+        end
+    end
+
+    -- Find and open the input device (Port 1)
+    local input_devices = renoise.Midi.available_input_devices()
+    for i = 1, table.getn(input_devices) do
+        if input_devices[i] == INPUT_DEVICE_NAME then
+            midi_input = renoise.Midi.create_input_device(INPUT_DEVICE_NAME, input_midi_callback)
             break
         end
     end
 
     if midi_output then
-        print("H2MIDI-Pro Preview: Connected to " .. DEVICE_NAME)
+        print("H2MIDI-Pro Preview: Output connected to " .. OUTPUT_DEVICE_NAME)
+    else
+        print("H2MIDI-Pro Preview: Output device '" .. OUTPUT_DEVICE_NAME .. "' not found")
+    end
+
+    if midi_input then
+        print("H2MIDI-Pro Preview: Input connected to " .. INPUT_DEVICE_NAME)
+    else
+        print("H2MIDI-Pro Preview: Input device '" .. INPUT_DEVICE_NAME .. "' not found")
+    end
+
+    if midi_output then
         attach_observers()
         start_timer()
-    else
-        print("H2MIDI-Pro Preview: Device '" .. DEVICE_NAME .. "' not found")
     end
 end
 
@@ -335,10 +430,15 @@ renoise.tool():add_menu_entry {
 -- Cleanup on document release (song close)
 renoise.tool().app_release_document_observable:add_notifier(function()
     all_notes_off()
+    cancel_resend()
     detach_observers()
     stop_timer()
     if midi_output then
         midi_output:close()
         midi_output = nil
+    end
+    if midi_input then
+        midi_input:close()
+        midi_input = nil
     end
 end)
