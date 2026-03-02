@@ -82,6 +82,9 @@ end
 -- Delayed resend logic (single timer)
 ------------------------------------------------------------------------
 
+-- Forward declaration (update_preview is defined further below)
+local update_preview
+
 local function resend_callback()
     -- Remove the one-shot timer
     if renoise.tool():has_timer(resend_callback) then
@@ -95,13 +98,15 @@ local function resend_callback()
     update_preview()
 end
 
+local cancel_resend
+
 local function schedule_resend()
     if resend_pending then cancel_resend() end
     resend_pending = true
     renoise.tool():add_timer(resend_callback, RESEND_DELAY_MS)
 end
 
-local function cancel_resend()
+cancel_resend =  function()
     if not resend_pending then return end
     if renoise.tool():has_timer(resend_callback) then
         renoise.tool():remove_timer(resend_callback)
@@ -203,7 +208,7 @@ local function line_fingerprint(pattern_track, line_index, num_columns)
     return table.concat(parts, ";")
 end
 
-local function update_preview()
+update_preview = function()
     local song = renoise.song()
 
     -- When Renoise is playing, stay silent so we don't double-trigger
