@@ -1,8 +1,9 @@
 -- H2MIDI-Pro Cursor Note Preview for Renoise
--- When NOT playing, tracks cursor position (line + track) and sends
--- the active notes at that position to "H2MIDI-Pro (Port 2)" as MIDI.
--- Looks backwards through the pattern to determine which notes are
--- still sustaining, and sends proper Note On / Note Off messages.
+-- Tracks cursor position (when stopped) or playback position (when
+-- playing) and sends the active notes at that position to
+-- "H2MIDI-Pro (Port 2)" as MIDI.  Looks backwards through the
+-- pattern to determine which notes are still sustaining, and sends
+-- proper Note On / Note Off messages.
 --
 -- Also listens on "H2MIDI-Pro (Port 1)" for incoming notes. When a
 -- note arrives that matches one we are already holding, we re-send
@@ -243,26 +244,41 @@ end
 update_preview = function()
     local song = renoise.song()
 
-    -- When Renoise is playing, stay silent so we don't double-trigger
-    if song.transport.playing then
-        if next(active_notes) then
-            all_notes_off()
-            cancel_resend()
+    local is_playing = song.transport.playing
+
+    -- Determine position and track context depending on play state
+    local cur_line, cur_track, cur_pattern, cur_seq
+
+    if is_playing then
+        -- Use the transport playback position
+        local pos = song.transport.playback_pos
+        cur_seq = pos.sequence
+        cur_line = pos.line
+
+        -- Resolve the pattern index from the sequence position
+        local seq_list = song.sequencer.pattern_sequence
+        if cur_seq < 1 or cur_seq > table.getn(seq_list) then
+            -- Out-of-range sequence position; silence and bail
+            if next(active_notes) then
+                all_notes_off()
+            end
+            return
         end
-        -- Reset tracked position so we re-trigger when playback stops
-        last_line_index = -1
-        last_track_index = -1
-        last_pattern_index = -1
-        last_line_fingerprint = ""
-        return
+        cur_pattern = seq_list[cur_seq]
+
+        -- During playback we still track the *selected* track so the
+        -- user's track focus determines which notes light up
+        cur_track = song.selected_track_index
+    else
+        -- Stopped – use the edit-cursor position
+        cur_line = song.selected_line_index
+        cur_track = song.selected_track_index
+        cur_pattern = song.selected_pattern_index
+        cur_seq = song.selected_sequence_index
     end
 
-    local cur_line = song.selected_line_index
-    local cur_track = song.selected_track_index
-    local cur_pattern = song.selected_pattern_index
-
     -- Only work on sequencer (note) tracks
-    local track = song.selected_track
+    local track = song:track(cur_track)
     if track.type ~= renoise.Track.TRACK_TYPE_SEQUENCER then
         all_notes_off()
         cancel_resend()
@@ -270,13 +286,20 @@ update_preview = function()
         return
     end
 
-    local pattern_track = song.selected_pattern.tracks[cur_track]
+    local pattern_track = song:pattern(cur_pattern).tracks[cur_track]
+    if not pattern_track then
+        all_notes_off()
+        cancel_resend()
+        last_line_fingerprint = ""
+        return
+    end
+
     local num_columns = track.visible_note_columns
 
-    -- Compute fingerprint to detect in-place edits
+    -- Compute fingerprint to detect in-place edits (or line changes)
     local fp = line_fingerprint(pattern_track, cur_line, num_columns)
 
-    -- Nothing to do if cursor hasn't moved AND content hasn't changed
+    -- Nothing to do if position hasn't moved AND content hasn't changed
     if cur_line == last_line_index
             and cur_track == last_track_index
             and cur_pattern == last_pattern_index
@@ -293,7 +316,6 @@ update_preview = function()
     cancel_resend()
 
     -- Build the set of notes that should be sounding right now
-    local cur_seq = song.selected_sequence_index
     local new_active = {}
     for col_idx = 1, num_columns do
         local info = find_active_note_at(song, cur_seq, cur_track, col_idx, cur_line)
