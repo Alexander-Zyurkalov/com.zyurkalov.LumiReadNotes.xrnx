@@ -32,11 +32,11 @@ local resend_pending = false
 -- Settings
 ------------------------------------------------------------------------
 local OUTPUT_DEVICE_NAME = "H2MIDI-Pro (Port 2)"
-local INPUT_DEVICE_NAME  = "H2MIDI-Pro (Port 1)"
+local INPUT_DEVICE_NAME = "H2MIDI-Pro (Port 1)"
 local DEFAULT_VELOCITY = 100
 local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
 local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
-local RESEND_DELAY_MS  = 500    -- Delay before re-sending a note after user press
+local RESEND_DELAY_MS = 500    -- Delay before re-sending a note after user press
 
 ------------------------------------------------------------------------
 -- Renoise note-value constants
@@ -69,7 +69,9 @@ end
 
 -- Panic: send Note Off on every note on every channel
 local function midi_panic()
-    if not midi_output then return end
+    if not midi_output then
+        return
+    end
     for ch = 0, 15 do
         for n = 0, 127 do
             send_note_off(n, ch)
@@ -101,13 +103,17 @@ end
 local cancel_resend
 
 local function schedule_resend()
-    if resend_pending then cancel_resend() end
+    if resend_pending then
+        cancel_resend()
+    end
     resend_pending = true
     renoise.tool():add_timer(resend_callback, RESEND_DELAY_MS)
 end
 
-cancel_resend =  function()
-    if not resend_pending then return end
+cancel_resend = function()
+    if not resend_pending then
+        return
+    end
     if renoise.tool():has_timer(resend_callback) then
         renoise.tool():remove_timer(resend_callback)
     end
@@ -118,8 +124,8 @@ end
 -- Port 1 MIDI input callback
 ------------------------------------------------------------------------
 local function input_midi_callback(message)
-    local status  = message[1]
-    local note    = message[2] or 0
+    local status = message[1]
+    local note = message[2] or 0
     local command = status - (status % 16)  -- strip channel
 
     -- We care about Note Off (0x80) or Note On with velocity 0 (also Note Off)
@@ -143,11 +149,18 @@ end
 -- Pattern analysis
 ------------------------------------------------------------------------
 
--- Walk backwards from `line_index` (inclusive) through `pattern_track`
--- for the given `column_index` and return the note info that should be
--- sounding at that position, or nil if the column is silent.
-local function find_active_note_at(pattern_track, column_index, line_index)
-    for l = line_index, 1, -1 do
+-- Maximum number of previous patterns to scan when looking for a
+-- sustaining note.  Keeps the search bounded to avoid runaway scans
+-- in songs with hundreds of patterns.
+local MAX_PATTERN_LOOKBACK = 8
+
+-- Scan a single pattern_track backwards from `start_line` down to line 1
+-- for `column_index`.  Returns one of:
+--   { note, velocity, channel }  – found a real note
+--   "off"                        – found an explicit Note Off
+--   nil                          – reached the top without finding anything
+local function scan_pattern_track(pattern_track, column_index, start_line)
+    for l = start_line, 1, -1 do
         local line = pattern_track:line(l)
         if not line then
             return nil
@@ -162,30 +175,47 @@ local function find_active_note_at(pattern_track, column_index, line_index)
         local note_val = col.note_value
 
         if note_val == NOTE_OFF_VALUE then
-            -- An explicit OFF before our position -> column is silent
-            return nil
+            return "off"
         elseif note_val ~= NOTE_EMPTY_VALUE then
-            -- Found a real note -> this is what should be sounding
             local vol = col.volume_value
-
-            -- Renoise volume 0x00-0x80 maps roughly to MIDI velocity.
-            -- 0xFF means "no value" (use default).
             local velocity = DEFAULT_VELOCITY
             if vol ~= 0xFF and vol <= 0x80 then
-                -- Scale 0-128 to 1-127 MIDI velocity
                 velocity = math.max(1, math.min(127, math.floor(vol * 127 / 0x80 + 0.5)))
             end
-
             return {
-                note     = note_val,
+                note = note_val,
                 velocity = velocity,
-                channel  = DEFAULT_CHANNEL,
+                channel = DEFAULT_CHANNEL,
             }
         end
-        -- NOTE_EMPTY_VALUE -> keep looking backwards
+    end
+    return nil  -- nothing found in this pattern
+end
+
+-- Walk backwards from `line_index` (inclusive) through the current
+-- pattern, and – if nothing is found – continue into previous patterns
+-- in the sequencer, up to MAX_PATTERN_LOOKBACK patterns back.
+local function find_active_note_at(song, cur_seq_index, cur_track_index, column_index, line_index)
+    local seq = song.sequencer.pattern_sequence
+
+    for s = cur_seq_index, math.max(1, cur_seq_index - MAX_PATTERN_LOOKBACK), -1 do
+        local pat = song:pattern(seq[s])
+        local pt = pat.tracks[cur_track_index]
+        if not pt then
+            break
+        end
+
+        local start_line = (s == cur_seq_index) and line_index or pat.number_of_lines
+        local result = scan_pattern_track(pt, column_index, start_line)
+        if result == "off" then
+            return nil
+        end
+        if result then
+            return result
+        end
     end
 
-    return nil -- reached top of pattern with no note
+    return nil
 end
 
 ------------------------------------------------------------------------
@@ -197,7 +227,9 @@ end
 local function line_fingerprint(pattern_track, line_index, num_columns)
     local parts = {}
     local line = pattern_track:line(line_index)
-    if not line then return "" end
+    if not line then
+        return ""
+    end
     local note_columns = line.note_columns
     for col = 1, num_columns do
         if col <= table.getn(note_columns) then
@@ -218,15 +250,15 @@ update_preview = function()
             cancel_resend()
         end
         -- Reset tracked position so we re-trigger when playback stops
-        last_line_index        = -1
-        last_track_index       = -1
-        last_pattern_index     = -1
-        last_line_fingerprint  = ""
+        last_line_index = -1
+        last_track_index = -1
+        last_pattern_index = -1
+        last_line_fingerprint = ""
         return
     end
 
-    local cur_line    = song.selected_line_index
-    local cur_track   = song.selected_track_index
+    local cur_line = song.selected_line_index
+    local cur_track = song.selected_track_index
     local cur_pattern = song.selected_pattern_index
 
     -- Only work on sequencer (note) tracks
@@ -239,31 +271,32 @@ update_preview = function()
     end
 
     local pattern_track = song.selected_pattern.tracks[cur_track]
-    local num_columns   = track.visible_note_columns
+    local num_columns = track.visible_note_columns
 
     -- Compute fingerprint to detect in-place edits
     local fp = line_fingerprint(pattern_track, cur_line, num_columns)
 
     -- Nothing to do if cursor hasn't moved AND content hasn't changed
-    if cur_line    == last_line_index
-            and cur_track   == last_track_index
+    if cur_line == last_line_index
+            and cur_track == last_track_index
             and cur_pattern == last_pattern_index
-            and fp          == last_line_fingerprint then
+            and fp == last_line_fingerprint then
         return
     end
 
-    last_line_index       = cur_line
-    last_track_index      = cur_track
-    last_pattern_index    = cur_pattern
+    last_line_index = cur_line
+    last_track_index = cur_track
+    last_pattern_index = cur_pattern
     last_line_fingerprint = fp
 
     -- Cancel pending resends – the context has changed
     cancel_resend()
 
     -- Build the set of notes that should be sounding right now
+    local cur_seq = song.selected_sequence_index
     local new_active = {}
     for col_idx = 1, num_columns do
-        local info = find_active_note_at(pattern_track, col_idx, cur_line)
+        local info = find_active_note_at(song, cur_seq, cur_track, col_idx, cur_line)
         if info then
             new_active[col_idx] = info
         end
@@ -275,7 +308,7 @@ update_preview = function()
     for col_idx, old in pairs(active_notes) do
         local new_info = new_active[col_idx]
         if not new_info
-                or new_info.note    ~= old.note
+                or new_info.note ~= old.note
                 or new_info.channel ~= old.channel then
             send_note_off(old.note, old.channel)
         end
@@ -285,7 +318,7 @@ update_preview = function()
     for col_idx, new_info in pairs(new_active) do
         local old = active_notes[col_idx]
         if not old
-                or old.note    ~= new_info.note
+                or old.note ~= new_info.note
                 or old.channel ~= new_info.channel then
             send_note_on(new_info.note, new_info.velocity, new_info.channel)
         end
@@ -321,7 +354,9 @@ local function on_pattern_changed()
 end
 
 local function attach_observers()
-    if observers_attached then return end
+    if observers_attached then
+        return
+    end
 
     local song = renoise.song()
 
@@ -337,7 +372,9 @@ local function attach_observers()
 end
 
 local function detach_observers()
-    if not observers_attached then return end
+    if not observers_attached then
+        return
+    end
 
     local song = renoise.song()
 
@@ -371,11 +408,11 @@ local function initialize()
     cancel_resend()
 
     -- Reset state
-    last_line_index       = -1
-    last_track_index      = -1
-    last_pattern_index    = -1
+    last_line_index = -1
+    last_track_index = -1
+    last_pattern_index = -1
     last_line_fingerprint = ""
-    active_notes          = {}
+    active_notes = {}
 
     -- Find and open the output device (Port 2)
     local output_devices = renoise.Midi.available_output_devices()
