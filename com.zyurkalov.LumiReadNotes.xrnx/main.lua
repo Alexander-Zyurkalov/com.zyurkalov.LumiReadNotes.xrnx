@@ -1,6 +1,5 @@
 -- H2MIDI-Pro Cursor Note Preview for Renoise
--- Tracks cursor position (when stopped) or playback position (when
--- playing) and sends the active notes at that position to
+-- Tracks cursor position and sends the active notes at that position to
 -- "H2MIDI-Pro (Port 2)" as MIDI.  Looks backwards through the
 -- pattern to determine which notes are still sustaining, and sends
 -- proper Note On / Note Off messages.

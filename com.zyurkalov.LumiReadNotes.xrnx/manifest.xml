@@ -4,7 +4,18 @@
     <Name>LumiReadNotes</Name>
     <Version>1.0.0</Version>
     <Author>Zyurkalov</Author>
-    <Description>This is a basic Renoise tool that does nothing.</Description>
+    <Description>
+        H2MIDI-Pro Cursor Note Preview for Renoise
+        Tracks cursor position and sends the active notes at that position to
+        "H2MIDI-Pro (Port 2)" as MIDI. Looks backwards through the
+        pattern to determine which notes are still sustaining, and sends
+        proper Note On / Note Off messages.
+
+        Also listens on "H2MIDI-Pro (Port 1)" for incoming notes. When a
+        note arrives that matches one we are already holding, we re-send
+        the Note On after 500ms so the keyboard LEDs re-light after the
+        user's own Note Off kills them.
+    </Description>
     <ApiVersion>6.2</ApiVersion>
     <Category>Tool Development</Category>
     <Homepage>http://scripting.renoise.com</Homepage>
