@@ -244,38 +244,14 @@ end
 update_preview = function()
     local song = renoise.song()
 
-    local is_playing = song.transport.playing
-
     -- Determine position and track context depending on play state
     local cur_line, cur_track, cur_pattern, cur_seq
 
-    if is_playing then
-        -- Use the transport playback position
-        local pos = song.transport.playback_pos
-        cur_seq = pos.sequence
-        cur_line = pos.line
-
-        -- Resolve the pattern index from the sequence position
-        local seq_list = song.sequencer.pattern_sequence
-        if cur_seq < 1 or cur_seq > table.getn(seq_list) then
-            -- Out-of-range sequence position; silence and bail
-            if next(active_notes) then
-                all_notes_off()
-            end
-            return
-        end
-        cur_pattern = seq_list[cur_seq]
-
-        -- During playback we still track the *selected* track so the
-        -- user's track focus determines which notes light up
-        cur_track = song.selected_track_index
-    else
-        -- Stopped – use the edit-cursor position
-        cur_line = song.selected_line_index
-        cur_track = song.selected_track_index
-        cur_pattern = song.selected_pattern_index
-        cur_seq = song.selected_sequence_index
-    end
+    -- Stopped – use the edit-cursor position
+    cur_line = song.selected_line_index
+    cur_track = song.selected_track_index
+    cur_pattern = song.selected_pattern_index
+    cur_seq = song.selected_sequence_index
 
     -- Only work on sequencer (note) tracks
     local track = song:track(cur_track)
