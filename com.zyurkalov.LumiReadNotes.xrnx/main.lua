@@ -31,8 +31,8 @@ local resend_pending = false
 ------------------------------------------------------------------------
 -- Settings
 ------------------------------------------------------------------------
-local OUTPUT_DEVICE_NAME = "H2MIDI-Pro (Port 2)"
-local INPUT_DEVICE_NAME = "H2MIDI-Pro (Port 1)"
+local OUTPUT_DEVICE_NAME = "Exquis"
+local INPUT_DEVICE_NAME = "Exquis"
 local DEFAULT_VELOCITY = 100
 local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
 local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
