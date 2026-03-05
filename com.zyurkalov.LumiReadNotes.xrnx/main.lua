@@ -451,8 +451,6 @@ end
 -- Entry points
 ------------------------------------------------------------------------
 
--- Auto-start
-initialize()
 
 -- Menu entry to reconnect / re-init
 renoise.tool():add_menu_entry {
@@ -481,3 +479,5 @@ renoise.tool().app_release_document_observable:add_notifier(function()
         midi_input = nil
     end
 end)
+
+renoise.tool().app_new_document_observable:add_notifier(initialize)
