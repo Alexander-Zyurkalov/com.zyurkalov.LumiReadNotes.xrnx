@@ -1,6 +1,6 @@
 -- H2MIDI-Pro Cursor Note Preview for Renoise
 -- Tracks cursor position and sends the active notes at that position to
--- "H2MIDI-Pro (Port 2)" as MIDI.  Looks backwards through the
+-- specified MIDI devices. Looks backwards through the
 -- pattern to determine which notes are still sustaining, and sends
 -- proper Note On / Note Off messages.
 --
@@ -12,7 +12,7 @@
 ------------------------------------------------------------------------
 -- Global state
 ------------------------------------------------------------------------
-local midi_output = nil          -- Port 2 (output to light keyboard)
+local midi_outputs = {}          -- Table to hold multiple output devices
 local midi_input = nil           -- Port 1 (listen for user key presses)
 local observers_attached = false
 
@@ -31,8 +31,8 @@ local resend_pending = false
 ------------------------------------------------------------------------
 -- Settings
 ------------------------------------------------------------------------
-local OUTPUT_DEVICE_NAME = "Exquis"
-local INPUT_DEVICE_NAME = "Exquis"
+local OUTPUT_DEVICE_NAMES = { "Exquis", "H2MIDI-Pro (Port 2)" }
+local INPUT_DEVICE_NAME = "H2MIDI-Pro (Port 1)"
 local DEFAULT_VELOCITY = 100
 local DEFAULT_CHANNEL = 0       -- 0-based MIDI channel (channel 1)
 local POLL_INTERVAL_MS = 50     -- How often we check for cursor movement
@@ -48,14 +48,18 @@ local NOTE_EMPTY_VALUE = 121    -- Empty / no note
 -- Low-level MIDI helpers
 ------------------------------------------------------------------------
 local function send_note_on(note, velocity, channel)
-    if midi_output and note >= 0 and note <= 119 then
-        midi_output:send({ 0x90 + (channel % 16), note, velocity })
+    if note >= 0 and note <= 119 then
+        for _, out_dev in ipairs(midi_outputs) do
+            out_dev:send({ 0x90 + (channel % 16), note, velocity })
+        end
     end
 end
 
 local function send_note_off(note, channel)
-    if midi_output and note >= 0 and note <= 119 then
-        midi_output:send({ 0x80 + (channel % 16), note, 0 })
+    if note >= 0 and note <= 119 then
+        for _, out_dev in ipairs(midi_outputs) do
+            out_dev:send({ 0x80 + (channel % 16), note, 0 })
+        end
     end
 end
 
@@ -69,7 +73,7 @@ end
 
 -- Panic: send Note Off on every note on every channel
 local function midi_panic()
-    if not midi_output then
+    if table.getn(midi_outputs) == 0 then
         return
     end
     for ch = 0, 15 do
@@ -391,11 +395,12 @@ end
 ------------------------------------------------------------------------
 local function initialize()
     -- Tear down previous session
-    if midi_output then
+    for _, out_dev in ipairs(midi_outputs) do
         all_notes_off()
-        midi_output:close()
-        midi_output = nil
+        out_dev:close()
     end
+    midi_outputs = {}
+
     if midi_input then
         midi_input:close()
         midi_input = nil
@@ -411,12 +416,18 @@ local function initialize()
     last_line_fingerprint = ""
     active_notes = {}
 
-    -- Find and open the output device (Port 2)
-    local output_devices = renoise.Midi.available_output_devices()
-    for i = 1, table.getn(output_devices) do
-        if output_devices[i] == OUTPUT_DEVICE_NAME then
-            midi_output = renoise.Midi.create_output_device(OUTPUT_DEVICE_NAME)
-            break
+    -- Find and open the output devices
+    local available_outs = renoise.Midi.available_output_devices()
+    for i = 1, table.getn(available_outs) do
+        local dev_name = available_outs[i]
+        for j = 1, table.getn(OUTPUT_DEVICE_NAMES) do
+            if dev_name == OUTPUT_DEVICE_NAMES[j] then
+                local out_dev = renoise.Midi.create_output_device(dev_name)
+                if out_dev then
+                    table.insert(midi_outputs, out_dev)
+                    print("H2MIDI-Pro Preview: Output connected to " .. dev_name)
+                end
+            end
         end
     end
 
@@ -429,10 +440,8 @@ local function initialize()
         end
     end
 
-    if midi_output then
-        print("H2MIDI-Pro Preview: Output connected to " .. OUTPUT_DEVICE_NAME)
-    else
-        print("H2MIDI-Pro Preview: Output device '" .. OUTPUT_DEVICE_NAME .. "' not found")
+    if table.getn(midi_outputs) == 0 then
+        print("H2MIDI-Pro Preview: No configured output devices found.")
     end
 
     if midi_input then
@@ -441,7 +450,7 @@ local function initialize()
         print("H2MIDI-Pro Preview: Input device '" .. INPUT_DEVICE_NAME .. "' not found")
     end
 
-    if midi_output then
+    if table.getn(midi_outputs) > 0 then
         attach_observers()
         start_timer()
     end
@@ -450,7 +459,6 @@ end
 ------------------------------------------------------------------------
 -- Entry points
 ------------------------------------------------------------------------
-
 
 -- Menu entry to reconnect / re-init
 renoise.tool():add_menu_entry {
@@ -470,10 +478,12 @@ renoise.tool().app_release_document_observable:add_notifier(function()
     cancel_resend()
     detach_observers()
     stop_timer()
-    if midi_output then
-        midi_output:close()
-        midi_output = nil
+
+    for _, out_dev in ipairs(midi_outputs) do
+        out_dev:close()
     end
+    midi_outputs = {}
+
     if midi_input then
         midi_input:close()
         midi_input = nil
